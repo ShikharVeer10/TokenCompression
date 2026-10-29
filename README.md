@@ -1,248 +1,139 @@
-# Token Compression for Long-Context LLMs
+# TokenCompression
 
-A research-driven capstone project focused on making long-context LLM inference more memory-efficient, faster, and practical on a single GPU.
+A notebook-based long-context inference prototype that combines **prompt compression** and **KV-cache eviction** to reduce the cost of running `Qwen/Qwen2.5-7B-Instruct` on a single GPU.
 
-## Why this project matters
+[![Open in Google Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ShikharVeer10/TokenCompression/blob/main/Token_Compression_Capstone_Final.ipynb)
 
-Large language models are increasingly expected to work with long inputs, but this creates a major bottleneck:
+## Overview
 
-- KV-cache memory grows linearly with context length
-- Attention cost grows quadratically with sequence length
-- Long-context decoding becomes slow and expensive on constrained hardware
+Long prompts increase both the amount of memory required for the KV cache and the work performed during generation. This project evaluates a two-stage inference pipeline:
 
-This project tackles that challenge by combining two complementary compression strategies:
+1. **Prompt compression:** LLMLingua-2 removes lower-value prompt content before generation.
+2. **KV-cache compression:** a SnapKV-inspired attention hook retains attention sinks, recent tokens, and selected heavy-hitter tokens during decoding.
 
-1. Prompt compression before generation
-2. KV-cache compression during generation
+The notebook is designed as an experimental capstone rather than a packaged Python library. All setup, model loading, inference, benchmarking, and visualization are contained in `Token_Compression_Capstone_Final.ipynb`.
 
-The result is a hybrid inference pipeline designed for real-world deployment on resource-limited GPU setups.
+## Features
 
-## Project vision
+- 4-bit NF4 loading of `Qwen/Qwen2.5-7B-Instruct` with BitsAndBytes
+- LLMLingua-2 prompt compression with configurable retention rates
+- Dynamic KV-cache eviction compatible with Hugging Face cache layouts
+- Adaptive retention-rate selection based on context characteristics
+- Protection for technical entities such as error codes, timestamps, identifiers, and node names
+- Four-way comparison of raw, prompt-compressed, KV-compressed, and hybrid inference
+- Token F1, ROUGE-L, entity recall, latency, throughput, and peak VRAM telemetry
+- Gradio interface for interactive compression and generation
+- Publication-style benchmark visualization saved as `capstone_evaluation_dashboard.png` when the visualization cell is run
 
-To build an end-to-end token compression engine for long-context LLMs that reduces GPU memory footprint and inference latency while preserving answer quality.
+## Architecture
 
-The work is designed around a practical research goal:
+```text
+Raw context + query
+        |
+        v
+Adaptive retention rate + critical-entity extraction
+        |
+        v
+LLMLingua-2 prompt compression
+        |
+        v
+Qwen/Qwen2.5-7B-Instruct (4-bit NF4)
+        |
+        v
+Optional SnapKV-style KV-cache eviction
+        |
+        v
+Generated answer + telemetry
+```
 
-> Can a long-context model run efficiently on a single Tesla T4 GPU without sacrificing too much factual quality?
+### Prompt compression
 
----
+The notebook uses:
 
-## The problem
+```text
+microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank
+```
 
-Modern LLMs struggle with long prompts because the model must retain a large amount of context throughout decoding. In practice, this leads to:
+The compressor can preserve structural punctuation and extracted technical entities while reporting original tokens, compressed tokens, token savings, and pruning percentage.
 
-- higher VRAM consumption
-- slower time-to-first-token
-- lower throughput
-- memory pressure during multi-turn or RAG-style workloads
+### KV-cache eviction
 
-This project addresses the two biggest contributors to that overhead:
+`SnapKVManager` installs forward hooks on the model’s self-attention layers. When a cache exceeds its configured capacity, it retains:
 
-- redundant tokens in the input prompt
-- unnecessary KV entries stored during generation
+- an initial sink region (`sink_size`)
+- top attention heavy hitters selected from the prefix
+- the most recent observation window (`window_size`)
 
----
+The default configuration is a 512-token capacity, 32-token observation window, 16-token sink region, and pooling kernel size 5.
 
-## Solution architecture
+## Benchmark modes
 
-### Stage 1: Prompt Compression with LLMLingua-2
+The notebook runs the same long-context QA workload under four conditions:
 
-Before inference, the input context is compressed using a token-aware importance model.
-
-- removes low-information filler content
-- preserves task-critical context
-- reduces prompt length before decoding starts
-
-This helps reduce the number of tokens the model must process and lowers downstream compute cost.
-
-### Stage 2: KV-Cache Compression with SnapKV
-
-During generation, the model keeps only the most important KV states instead of storing the full cache.
-
-- preserves attention sinks
-- prioritizes high-attention “heavy hitters”
-- retains the recent observation window
-- evicts lower-priority states from active GPU memory
-
-This reduces the memory footprint of generation while keeping the model responsive to critical context.
-
-### Combined system
-
-The project evaluates the hybrid configuration:
-
-- LLMLingua-2 for prompt pruning
-- SnapKV for cache reduction
-- 4-bit quantized Qwen2.5-7B-Instruct as the base model
-
-This creates a lightweight long-context inference pipeline optimized for constrained GPU environments.
-
----
-
-## Core implementation
-
-The complete research workflow and experiments live in:
-
-- `Token_Compression_Capstone_Final.ipynb`
-
-The notebook includes:
-
-- GPU environment validation and dependency setup
-- 4-bit quantization with BitsAndBytes
-- loading of `Qwen/Qwen2.5-7B-Instruct`
-- LLMLingua-2-based prompt distillation
-- SnapKV-style attention-hook KV eviction
-- multi-condition benchmarking on long-context QA tasks
-- visualization of memory, latency, and answer-quality comparisons
-
----
-
-## Models and hardware
-
-The project is implemented and evaluated for the following setup:
-
-- Base model: `Qwen/Qwen2.5-7B-Instruct`
-- Quantization: 4-bit NF4
-- Hardware target: NVIDIA Tesla T4 (15GB VRAM class)
-- Frameworks: PyTorch, Transformers, Accelerate, BitsAndBytes
-
----
-
-## Benchmarking setup
-
-The notebook evaluates four configurations:
-
-1. Baseline: raw context + full KV cache
+1. Baseline: raw context with the full KV cache
 2. LLMLingua-2 only
 3. SnapKV only
-4. Hybrid: LLMLingua-2 + SnapKV
+4. Hybrid engine: LLMLingua-2 plus SnapKV
 
-### Metrics tracked
+Results are generated at runtime and displayed as a telemetry table. The benchmark reports input and output tokens, latency, throughput, peak VRAM, token F1, ROUGE-L, and target-entity recall. Results depend on the GPU, installed library versions, and runtime state, so the README does not hard-code a benchmark table.
 
-- Input tokens
-- Output tokens
-- Latency and time-to-first-token
-- Throughput
-- Peak VRAM usage
-- Token savings and estimated VRAM reduction
-- Token F1 and ROUGE-L
-- Entity recall and answer quality
+## Interactive interface
 
----
+The final notebook section launches a Gradio application with controls for:
 
-## Sample experimental results
+- raw context and user query
+- Stage 1 retention rate
+- enabling or disabling SnapKV eviction
+- KV-cache capacity
 
-These values were reported in the notebook as part of the capstone evaluation workflow:
+The interface returns the generated answer, token counts, pruning percentage, latency, and peak VRAM usage. In Colab, `demo.launch(share=True)` creates a temporary share URL.
 
-| Condition | Input Tokens | Latency (s) | Throughput (tps) | Peak VRAM (GB) | VRAM Saved |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Baseline | 1683 | 5.14 | 7.20 | 12.59 | 0.0% |
-| LLMLingua-2 Only | 1211 | 8.64 | 5.90 | 12.19 | 3.2% |
-| SnapKV Only | 1683 | 7.15 | 5.17 | 12.59 | 0.0% |
-| Hybrid Engine | 1211 | 7.79 | 6.55 | 12.19 | 3.2% |
+## Requirements
 
-These results show the project’s emphasis on practical efficiency trade-offs and evaluation-driven design rather than just theoretical claims.
+- Python 3.10+ recommended
+- NVIDIA GPU with CUDA support
+- Approximately 15 GB of VRAM recommended for the target Tesla T4 setup
+- Google Colab is the easiest way to run the notebook
 
----
+The notebook installs the main dependencies, including:
 
-## Why this stands out
-
-This project combines research depth with implementation realism.
-
-It is not just a demo; it is a full experimentation pipeline that:
-
-- evaluates multiple compression strategies side by side
-- compares behavior under real generation workloads
-- stresses memory-constrained deployment scenarios
-- grounds results in measurable benchmark metrics
-
-That makes it especially compelling for:
-
-- research-focused teams
-- applied AI engineering roles
-- LLM optimization and inference systems work
-- recruiters looking for practical ML engineering depth
-
----
-
-## Tech stack
-
-- Python
 - PyTorch
-- Hugging Face Transformers
-- BitsAndBytes
+- Transformers
 - Accelerate
+- BitsAndBytes
 - LLMLingua
-- SnapKV-inspired attention logic
 - Pydantic
-- FastAPI
 - Gradio
-- Seaborn
-- Evaluate
-- ROUGE score utilities
+- Pandas, NumPy, and Seaborn
+- ROUGE and evaluation utilities
 
----
+## Run the project
 
-## Repository layout
+1. Open the notebook in Google Colab using the badge above.
+2. Select a GPU runtime.
+3. Run the cells from top to bottom.
+4. Allow the model and LLMLingua-2 checkpoint to download.
+5. Review the Stage 1 sanity check, four-condition benchmark, visualization, and Gradio interface.
+
+The notebook expects a CUDA device. CPU-only execution is not the supported configuration for the 7B model and compression pipeline.
+
+## Repository structure
 
 ```text
 TokenCompression/
 ├── README.md
-├── Token_Compression_Capstone_Final.ipynb
-└── (notebook-based experiments and evaluation workflow)
+└── Token_Compression_Capstone_Final.ipynb
 ```
 
----
+## Scope and limitations
 
-## How to run
-
-This project is primarily notebook-based and is best run in a GPU-enabled environment such as Google Colab.
-
-1. Open `Token_Compression_Capstone_Final.ipynb`
-2. Run the environment setup cells
-3. Load the model and benchmark pipeline
-4. Compare baseline vs compressed configurations
-
-The notebook is structured to walk through the full pipeline from setup to evaluation.
-
----
-
-## Research direction
-
-This work sits at the intersection of:
-
-- efficient inference
-- long-context modeling
-- prompt optimization
-- memory-aware decoding
-- low-bit model deployment
-- LLM serving systems
-
-The broader goal is to explore how compression strategies can make long-context AI systems more practical in real-world, compute-limited environments.
-
----
+- This is an experimental notebook, not an installable package or command-line application.
+- Benchmark outputs are machine- and run-dependent.
+- SnapKV eviction is implemented as a project-specific attention hook inspired by the SnapKV approach; it is not the upstream SnapKV package.
+- The notebook’s optional Git integration cell can push changes from Colab when a `GITHUB_TOKEN` secret is configured. Do not place tokens directly in the notebook or repository.
 
 ## References
 
-- LLMLingua — Compressing Prompts for Accelerated Inference of Large Language Models
-- LongLLMLingua — Accelerating and Enhancing LLMs in Long Context Scenarios via Prompt Compression
-- LLMLingua-2 — Data Distillation for Efficient and Faithful Task-Agnostic Prompt Compression
-- SnapKV — LLM Knows What You are Looking for Before Generation
-- TOVA — Token Omission Via Attention
-- StreamingLLM — Efficient Streaming Language Models with Attention Sinks
-- CacheGen — KV Cache Compression and Streaming for Fast Large Language Model Serving
-- KIVI — A Tuning-Free Asymmetric 2bit Quantization for KV Cache
-- QUEST — Query-Aware Sparsity for Efficient Long-Context LLM Inference
-
----
-
-## Final note
-
-This project demonstrates a strong combination of research thinking, systems awareness, and deployment-focused optimization. It is a compelling example of applied AI engineering: solving a real bottleneck in LLM inference with practical, measurable improvements.
-
-If you are exploring long-context LLM efficiency, this project is a meaningful step toward building faster, cheaper, and more scalable inference pipelines.
-
----
-
-## Acknowledgements
-
-This project builds upon the research and open-source work behind prompt compression, KV-cache optimization, and efficient LLM inference techniques.
+- [LLMLingua-2: Data Distillation for Efficient and Faithful Task-Agnostic Prompt Compression](https://arxiv.org/abs/2403.12968)
+- [SnapKV: LLM Knows What You are Looking for Before Generation](https://arxiv.org/abs/2404.14469)
+- [Qwen2.5](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct)
